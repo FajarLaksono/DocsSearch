@@ -3,7 +3,7 @@
 LLM_MODEL ?= llama3.2:3b
 EMBED_MODEL ?= all-minilm
 
-.PHONY: up down logs psql smoke models pull-models reset-db clean shell
+.PHONY: up down logs psql smoke ingest reingest retrieve ask test models pull-models reset-db clean shell
 
 up:            ## start Postgres and the app (build if needed)
 	docker compose up -d --build
@@ -19,6 +19,9 @@ psql:          ## open a SQL shell on the database
 
 smoke:         ## prove db + chat model + embedding model all work
 	docker compose run --rm app python -m src.smoke
+
+test:          ## run unit tests (no database, no model)
+	docker compose run --rm --no-deps app python -m pytest -q
 
 models:        ## list the models installed in Ollama (host)
 	ollama list
@@ -37,3 +40,15 @@ clean:         ## stop everything and delete the database volume
 
 shell:         ## a bash shell inside the app container
 	docker compose exec app bash
+
+ingest:        ## load, chunk, embed, and store everything under data/
+	docker compose run --rm app python -m src.ingest
+
+reingest:      ## same, but clear the database first (use after deleting files)
+	docker compose run --rm app python -m src.ingest --reset
+
+retrieve:      ## show the top-k chunks for a question, no generation
+	docker compose run --rm app python -m src.retrieve "$(Q)"
+
+ask:           ## answer a question with citations
+	docker compose run --rm app python -m src.ask "$(Q)"

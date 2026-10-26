@@ -22,6 +22,8 @@ services:
     build: .
     env_file: .env
     environment:
+      # Containers reach native Ollama on Windows through Docker Desktop.
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
       # Inside the compose network the database is called "db", not localhost.
       DATABASE_URL: postgresql://aidocsuser:aidocspassword@db:5432/aidocs
     depends_on:

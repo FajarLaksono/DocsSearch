@@ -7,5 +7,8 @@ __pycache__/
 # the user's own documents; the authored sample corpus is exempted in Phase 1
 data/*
 !data/.gitkeep
+!data/sample/
+!data/sample/**
+!data/.gitkeep
 docs/
 MyNotes.txt
