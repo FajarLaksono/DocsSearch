@@ -1,0 +1,11 @@
+.env
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# the user's own documents; the authored sample corpus is exempted in Phase 1
+data/*
+!data/.gitkeep
+docs/
+MyNotes.txt

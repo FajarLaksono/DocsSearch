@@ -1,0 +1,36 @@
+name: docssearch
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: aidocsuser
+      POSTGRES_PASSWORD: aidocspassword
+      POSTGRES_DB: aidocs
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aidocsuser -d aidocs"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build: .
+    env_file: .env
+    environment:
+      # Inside the compose network the database is called "db", not localhost.
+      DATABASE_URL: postgresql://aidocsuser:aidocspassword@db:5432/aidocs
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./:/app
+
+volumes:
+  pgdata:
