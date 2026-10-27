@@ -1,4 +1,4 @@
-from trace import compute_metrics
+from src.trace import compute_metrics
 
 
 def test_metrics_with_several_scores():

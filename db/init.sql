@@ -45,5 +45,12 @@ CREATE TABLE eval_results (
   hit          BOOLEAN,
   faithfulness REAL,
   correct      BOOLEAN,
-  run_id       INT REFERENCES runs(id)
+  run_id       INT REFERENCES runs(id),
+  mrr          REAL,
+  refused      BOOLEAN,
+  latency_ms   INT,
+  details      JSONB,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE INDEX eval_results_label_idx ON eval_results (eval_label);
