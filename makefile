@@ -3,7 +3,7 @@
 LLM_MODEL ?= llama3.2:3b
 EMBED_MODEL ?= all-minilm
 
-.PHONY: up down logs psql smoke ingest reingest retrieve ask test models pull-models reset-db clean shell
+.PHONY: up down logs psql smoke ingest reingest retrieve ask trace test models pull-models reset-db clean shell
 
 up:            ## start Postgres and the app (build if needed)
 	docker compose up -d --build
@@ -52,3 +52,6 @@ retrieve:      ## show the top-k chunks for a question, no generation
 
 ask:           ## answer a question with citations
 	docker compose run --rm app python -m src.ask "$(Q)"
+
+trace:         ## print a stored run (latest, or ID=n)
+	docker compose run --rm app python -m src.trace $(ID)

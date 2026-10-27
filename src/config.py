@@ -22,6 +22,7 @@ class Settings:
         self.num_ctx: int = int(os.getenv("NUM_CTX", "4096"))
 
         self.top_k: int = int(os.getenv("TOP_K", "4"))
+        self.min_top_score: float = float(os.getenv("MIN_TOP_SCORE", "0.35"))
         self.chunk_tokens: int = int(os.getenv("CHUNK_TOKENS", "300"))
         self.chunk_overlap: int = int(os.getenv("CHUNK_OVERLAP", "50"))
 

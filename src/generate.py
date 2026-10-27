@@ -61,7 +61,11 @@ def is_refusal(text: str) -> bool:
     return REFUSAL_RE.search(text) is not None
 
 
-def answer_question(question: str, k: int | None = None) -> Answer:
+def answer_question(
+    question: str,
+    k: int | None = None,
+    model: str | None = None,
+) -> Answer:
     started = time.perf_counter()
     hits = search(question, k=k)
 
@@ -69,7 +73,7 @@ def answer_question(question: str, k: int | None = None) -> Answer:
         elapsed = int((time.perf_counter() - started) * 1000)
         return Answer(question, REFUSAL_TEXT, [], [], True, elapsed, 0, 0)
 
-    result = llm.get_client().generate(build_messages(question, hits))
+    result = llm.get_client().generate(build_messages(question, hits), model=model)
     text = result["text"].strip()
 
     return Answer(
