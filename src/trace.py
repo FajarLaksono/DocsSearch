@@ -51,9 +51,8 @@ def compute_metrics(
     }
 
 
-def record(answer: Answer, *, llm_model: str, embed_model: str | None = None) -> int:
-    """Write one run and return its id."""
-    steps = [
+def _default_steps(answer: Answer) -> list[dict[str, Any]]:
+    return [
         {
             "type": "retrieval",
             "query": answer.question,
@@ -66,17 +65,44 @@ def record(answer: Answer, *, llm_model: str, embed_model: str | None = None) ->
                 }
                 for hit in answer.hits
             ],
-        },
+        }
+    ]
+
+
+def record(
+    answer: Answer,
+    *,
+    llm_model: str,
+    embed_model: str | None = None,
+    steps: list[dict[str, Any]] | None = None,
+    metrics: dict[str, Any] | None = None,
+) -> int:
+    """Write one run and return its id.
+
+    `steps` lets the agent supply its thoughts, tool calls, and observations.
+    The answer step is always appended here, from the `Answer` object, so the
+    stored text and citations cannot drift from what was returned.
+
+    `metrics` lets the agent add fields such as `reason` and `searches`. When it
+    is None the Phase 2 arithmetic is used.
+    """
+    steps = list(steps) if steps is not None else _default_steps(answer)
+    steps.append(
         {
             "type": "answer",
             "text": answer.text,
             "citations": answer.citations,
             "refused": answer.refused,
-        },
-    ]
-    metrics = compute_metrics(
-        [hit.score for hit in answer.hits], answer.citations, answer.refused
+            # The exact rank order the model saw. Without this, a reload has to
+            # recompute order, and a score tie or a filtered chunk breaks links.
+            "chunks": [hit.chunk_id for hit in answer.hits],
+        }
     )
+
+    if metrics is None:
+        metrics = compute_metrics(
+            [hit.score for hit in answer.hits], answer.citations, answer.refused
+        )
 
     with db.connect() as conn:
         row = conn.execute(
@@ -145,13 +171,38 @@ def _chunk_contents(chunk_ids: list[int]) -> dict[int, str]:
     return {int(chunk_id): content for chunk_id, content in rows}
 
 
+def _chunks_from_steps(steps: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    """Best copy of every chunk mentioned by a retrieval or observation step."""
+    found: dict[int, dict[str, Any]] = {}
+
+    for step in steps:
+        if step.get("type") not in ("retrieval", "observation"):
+            continue
+        for chunk in step.get("chunks", []):
+            chunk_id = int(chunk["chunk_id"])
+            previous = found.get(chunk_id)
+            if previous is None or float(chunk["score"]) > float(previous["score"]):
+                found[chunk_id] = chunk
+
+    return found
+
+
 def answer_from_run(run: dict[str, Any]) -> Answer:
     """Rebuild the Answer object from stored steps, joining chunk text by id."""
     steps = run.get("steps") or []
-    retrieval = next((s for s in steps if s.get("type") == "retrieval"), {})
     answer_step = next((s for s in steps if s.get("type") == "answer"), {})
-    chunks = retrieval.get("chunks", [])
-    contents = _chunk_contents([int(c["chunk_id"]) for c in chunks])
+    chunks_by_id = _chunks_from_steps(steps)
+
+    order = [int(chunk_id) for chunk_id in answer_step.get("chunks", [])]
+    if order:
+        chunks = [chunks_by_id[cid] for cid in order if cid in chunks_by_id]
+    else:
+        chunks = sorted(
+            chunks_by_id.values(),
+            key=lambda chunk: (-float(chunk["score"]), int(chunk["chunk_id"])),
+        )
+
+    contents = _chunk_contents([int(chunk["chunk_id"]) for chunk in chunks])
 
     hits = [
         Hit(
@@ -178,6 +229,29 @@ def answer_from_run(run: dict[str, Any]) -> Answer:
     )
 
 
+def format_steps(steps: list[dict[str, Any]]) -> list[str]:
+    """Render stored steps. Reads JSONB only: no agent import, no model."""
+    lines: list[str] = []
+    for step in steps or []:
+        kind = step.get("type")
+        if kind == "thought":
+            lines.append(f"  step {step.get('step')}  thought: {step.get('text', '')}")
+        elif kind == "tool_call":
+            name = step.get("name", "?")
+            if name == "answer":
+                lines.append(f"  step {step.get('step')}  action: answer")
+            else:
+                lines.append(
+                    f"  step {step.get('step')}  action: {name}({step.get('input', '')!r})"
+                )
+        elif step.get("error"):
+            lines.append(f"           protocol: {step['error']}")
+        elif kind == "observation":
+            lines.append(f"           result: {step.get('summary', '')}")
+    return lines
+
+
+
 def main() -> None:
     run = load_run(int(sys.argv[1])) if len(sys.argv) > 1 else load_latest()
     answer = answer_from_run(run)
@@ -187,6 +261,10 @@ def main() -> None:
         f"{run['llm_model']}  {run['latency_ms']} ms"
     )
     print(f"Q: {run['question']}")
+    if run.get("steps"):
+        print("steps:")
+        for line in format_steps(run["steps"]):
+            print(line)
     print(f"A: {answer.text}")
     print(f"metrics: {run['metrics']}")
     print("sources:")

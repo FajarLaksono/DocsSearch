@@ -15,7 +15,7 @@ from typing import Any
 
 import streamlit as st
 
-from src import llm, trace
+from src import llm, trace, agent
 from src.config import settings
 from src.generate import Answer, answer_question
 
@@ -101,6 +101,42 @@ def confidence_flags(answer: Answer, threshold: float) -> list[tuple[str, str]]:
     return flags
 
 
+def agent_flags(metrics: dict[str, Any]) -> list[tuple[str, str]]:
+    """Warnings that only exist because there was a loop."""
+    flags: list[tuple[str, str]] = []
+    stop = metrics.get("stop_reason")
+    reason = metrics.get("reason")
+    searches = int(metrics.get("searches") or 0)
+
+    if stop == "step_limit":
+        flags.append(
+            (
+                "warning",
+                "The planner used every decision without choosing answer; "
+                "this answer came from a partial search history.",
+            )
+        )
+    if stop == "invalid_json":
+        flags.append(
+            (
+                "error",
+                "Two consecutive planner replies could not be parsed; "
+                "the answer fell back to the sources collected so far.",
+            )
+        )
+    if stop == "model_error":
+        flags.append(("error", "A model call raised; the loop stopped early."))
+    if reason == "answered" and searches >= 2:
+        flags.append(
+            (
+                "info",
+                f"The planner needed {searches} searches; "
+                "the question's own words were not enough.",
+            )
+        )
+    return flags
+
+
 # ------------------------------------------------------------------ sidebar ---
 with st.sidebar:
     st.title("DocsSearch")
@@ -116,6 +152,22 @@ with st.sidebar:
     top_k = st.slider("Chunks to retrieve (k)", 1, 8, settings.top_k)
 
     st.divider()
+    st.subheader("Pipeline")
+    mode = st.radio(
+        "Mode",
+        ["Single pass", "Agent"],
+        horizontal=True,
+        help="Single pass: one retrieval. Agent: up to N search decisions.",
+    )
+    use_agent = mode == "Agent"
+    thinking = "off"
+    budget = settings.max_steps
+    if use_agent:
+        thinking = st.selectbox("Thinking", ["off", "prompted"], index=0)
+        budget = st.slider("Max decisions", 1, 5, settings.max_steps)
+
+
+    st.divider()
     st.subheader("Confidence")
     threshold = st.slider(
         "MIN_TOP_SCORE (flag only)",
@@ -124,7 +176,8 @@ with st.sidebar:
         float(settings.min_top_score),
         0.01,
     )
-    st.caption("Phase 4 turns this value into an actual refusal rule.")
+    st.caption("The agent's gate uses this value to refuse before answering.")
+
 
     st.divider()
     st.subheader("History")
@@ -165,12 +218,29 @@ if submitted:
     else:
         with st.spinner(f"Asking {model}…"):
             try:
-                answer = answer_question(question.strip(), k=top_k, model=model)
-                run_id = trace.record(answer, llm_model=model)
+                if use_agent:
+                    result = agent.run_agent(
+                        question.strip(),
+                        model=model,
+                        k=top_k,
+                        max_steps=budget,
+                        thinking=thinking,
+                    )
+                    answer = result.answer
+                    run_id = trace.record(
+                        answer,
+                        llm_model=model,
+                        steps=result.steps,
+                        metrics=result.metrics,
+                    )
+                else:
+                    answer = answer_question(question.strip(), k=top_k, model=model)
+                    run_id = trace.record(answer, llm_model=model)
                 st.session_state["answer"] = answer
                 st.session_state["run"] = trace.load_run(run_id)
             except Exception as exc:
                 st.error(f"The question failed: {exc}")
+
 
 answer: Answer | None = (
     st.session_state["answer"] if "answer" in st.session_state else None
@@ -193,6 +263,13 @@ columns[1].metric(
 )
 columns[2].metric("Latency", f"{answer.latency_ms} ms")
 columns[3].metric("Tokens", f"{answer.tokens_in} in / {answer.tokens_out} out")
+
+if metrics.get("reason"):
+    st.caption(
+        f"agent · {metrics['reason']} · stop={metrics['stop_reason']} · "
+        f"{metrics['steps']} decision(s) · {metrics['searches']} search(es) · "
+        f"{metrics['llm_calls']} model call(s) · thinking={metrics.get('thinking')}"
+    )
 
 st.subheader("Answer")
 st.markdown(render_answer(answer.text, len(answer.hits)), unsafe_allow_html=True)
@@ -223,21 +300,47 @@ with trace_tab:
     steps = (run or {}).get("steps") or []
     if not steps:
         st.info("No stored steps for this answer.")
+    
+    if any(
+        step.get("type") in ("thought", "tool_call", "observation")
+        for step in steps
+    ):
+        st.caption("Agent decisions in order. Read top to bottom.")
+
     for index, step in enumerate(steps, start=1):
         kind = step.get("type", "unknown")
-        st.markdown(f"**Step {index} — `{kind}`**")
-        if kind == "retrieval":
+        number = step.get("step", index)
+
+        if kind == "thought":
+            st.markdown(f"**Step {number} — thought**\n\n> {step.get('text', '')}")
+        elif kind == "tool_call":
+            name = step.get("name", "?")
+            if name == "answer":
+                st.markdown(f"**Step {number} — action** `answer`")
+            else:
+                st.markdown(
+                    f"**Step {number} — action** `{name}({step.get('input', '')})`"
+                )
+        elif kind == "observation":
+            if step.get("error"):
+                st.warning(f"Protocol error: {step['error']}")
+            else:
+                st.write(step.get("text") or step.get("summary", ""))
+                chunks = step.get("chunks", [])
+                if chunks:
+                    with st.expander(f"{len(chunks)} chunk(s) returned"):
+                        st.dataframe(chunks, hide_index=True, use_container_width=True)
+        elif kind == "retrieval":
             st.write(f"Embedded query: `{step.get('query')}`")
             chunks = step.get("chunks", [])
             if chunks:
                 st.dataframe(chunks, hide_index=True, use_container_width=True)
         elif kind == "answer":
             st.write(step.get("text", ""))
-            st.caption(
-                f"citations={step.get('citations')} refused={step.get('refused')}"
-            )
+            st.caption(f"citations={step.get('citations')} refused={step.get('refused')}")
         else:
             st.json(jsonable(step))
+
     if run:
         st.caption(
             f"llm_model={run['llm_model']} · embed_model={run['embed_model']} · "
@@ -246,7 +349,7 @@ with trace_tab:
 
 with confidence_tab:
     st.caption("Rule-based flags from the stored scores. No model is called.")
-    for level, message in confidence_flags(answer, threshold):
+    for level, message in confidence_flags(answer, threshold) + agent_flags(metrics):
         getattr(st, level)(message)
     st.divider()
     st.json(jsonable(metrics))

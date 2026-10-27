@@ -3,7 +3,7 @@
 LLM_MODEL ?= llama3.2:3b
 EMBED_MODEL ?= all-minilm
 
-.PHONY: up down logs psql smoke ingest reingest retrieve ask trace eval test models pull-models reset-db clean shell
+.PHONY: up down logs psql smoke ingest reingest retrieve ask trace eval agent test models pull-models reset-db clean shell
 
 up:            ## start Postgres and the app (build if needed)
 	docker compose up -d --build
@@ -58,3 +58,6 @@ trace:         ## print a stored run (latest, or ID=n)
 
 eval:          ## run the gold set (ARGS=--limit 5 --no-judge)
 	docker compose run --rm app python -m src.evaluate $(ARGS)
+
+agent:         ## run the agent loop (Q=..., ARGS=--thinking prompted)
+	docker compose run --rm app python -m src.agent "$(Q)" $(ARGS)

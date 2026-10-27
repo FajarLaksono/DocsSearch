@@ -7,6 +7,7 @@ back to the setup behind it.
 
 from __future__ import annotations
 
+import time
 import argparse
 import json
 from pathlib import Path
@@ -14,9 +15,10 @@ from typing import Any
 
 from psycopg.types.json import Jsonb
 
-from src import db, judge, metrics, trace
+from src import agent, db, judge, metrics, trace
 from src.config import settings
 from src.generate import answer_question
+
 
 GOLD_PATH = Path("eval/gold.jsonl")
 REQUIRED = {"id", "question", "answerable"}
@@ -118,10 +120,17 @@ def check_gold(path: Path = GOLD_PATH) -> int:
 
 
 def config_snapshot(
-    *, model: str | None = None, k: int | None = None, use_judge: bool = True
+    *,
+    model: str | None = None,
+    k: int | None = None,
+    use_judge: bool = True,
+    use_agent: bool = False,
+    max_steps: int | None = None,
+    thinking: str | None = None,
 ) -> dict[str, Any]:
     """The settings that make this row's numbers reproducible."""
     return {
+        "mode": "agent" if use_agent else "single",
         "llm_model": model or settings.llm_model,
         "judge_model": settings.judge_model if use_judge else None,
         "embed_model": settings.embed_model,
@@ -130,7 +139,10 @@ def config_snapshot(
         "top_k": k or settings.top_k,
         "min_top_score": settings.min_top_score,
         "num_ctx": settings.num_ctx,
+        "max_steps": (max_steps or settings.max_steps) if use_agent else None,
+        "thinking": (thinking or settings.thinking) if use_agent else None,
     }
+
 
 
 def insert_result(row: dict[str, Any]) -> None:
@@ -170,6 +182,8 @@ def save_row(
     model: str | None,
     k: int | None,
     use_judge: bool,
+    use_agent: bool = False,
+    agent_metrics: dict[str, Any] | None = None,
 ) -> None:
     details = {
         "answerable": bool(item["answerable"]),
@@ -182,7 +196,15 @@ def save_row(
         "top_score": answer.hits[0].score if answer.hits else None,
         "judge_claims": verdict.claims,
         "judge_error": verdict.error,
-        "config": config_snapshot(model=model, k=k, use_judge=use_judge),
+        "agent": agent_metrics,
+        "config": config_snapshot(
+            model=model,
+            k=k,
+            use_judge=use_judge,
+            use_agent=use_agent,
+            max_steps=(agent_metrics or {}).get("max_steps"),
+            thinking=(agent_metrics or {}).get("thinking"),
+        ),
     }
     insert_result(
         {
@@ -260,6 +282,9 @@ def run(
     model: str | None = None,
     k: int | None = None,
     resume: bool = False,
+    use_agent: bool = False,
+    max_steps: int | None = None,
+    thinking: str | None = None,
 ) -> dict[str, Any]:
     gold = load_gold()
     if limit:
@@ -280,8 +305,37 @@ def run(
         if item["id"] in existing:
             continue
 
-        answer = answer_question(item["question"], k=k, model=model)
-        run_id = trace.record(answer, llm_model=model or settings.llm_model)
+        agent_metrics: dict[str, Any] | None = None
+        if use_agent:
+            result = agent.run_agent(
+                item["question"],
+                model=model,
+                k=k,
+                max_steps=max_steps,
+                thinking=thinking,
+            )
+            answer = result.answer
+            run_id = trace.record(
+                answer,
+                llm_model=model or settings.llm_model,
+                steps=result.steps,
+                metrics=result.metrics,
+            )
+            agent_metrics = {
+                key: result.metrics.get(key)
+                for key in (
+                    "reason",
+                    "stop_reason",
+                    "steps",
+                    "searches",
+                    "llm_calls",
+                    "thinking",
+                    "max_steps",
+                )
+            }
+        else:
+            answer = answer_question(item["question"], k=k, model=model)
+            run_id = trace.record(answer, llm_model=model or settings.llm_model)
 
         answerable = bool(item["answerable"])
         hit = (
@@ -305,12 +359,16 @@ def run(
 
         verdict = judge.JudgeResult(faithfulness=None, correct=None)
         if use_judge:
-            verdict = judge.judge_answer(
-                item["question"],
-                answer.text,
-                judge.format_context(answer.hits),
-                gold_answer=item.get("gold_answer"),
-            )
+            # Skip judging correctly refused unanswerable questions to save load
+            if not answerable and answer.refused:
+                verdict = judge.JudgeResult(faithfulness=None, correct=None)
+            else:
+                verdict = judge.judge_answer(
+                    item["question"],
+                    answer.text,
+                    judge.format_context(answer.hits),
+                    gold_answer=item.get("gold_answer"),
+                )
 
         save_row(
             label=label,
@@ -323,16 +381,49 @@ def run(
             model=model,
             k=k,
             use_judge=use_judge,
+            use_agent=use_agent,
+            agent_metrics=agent_metrics,
         )
+        time.sleep(2)
 
         faith = "  n/a" if verdict.faithfulness is None else f"{verdict.faithfulness:.3f}"
         rank = "  n/a" if reciprocal_rank is None else f"{reciprocal_rank:5.3f}"
+        tag = f"  {agent_metrics['reason']:<20}" if agent_metrics else ""
         print(
             f"[{index:02}/{total}] {item['id']}  hit={str(hit):5}  rr={rank}  "
-            f"faith={faith}  {answer.latency_ms:5} ms"
+            f"faith={faith}{tag}  {answer.latency_ms:5} ms"
         )
 
     return summarize_label(label)
+
+
+def agent_stats(label: str) -> dict[str, Any]:
+    """Averages over the loop itself: searches, decisions, and why it stopped."""
+    agents = [
+        (row["details"] or {}).get("agent")
+        for row in load_results(label)
+    ]
+    agents = [entry for entry in agents if entry]
+    if not agents:
+        return {}
+
+    n = len(agents)
+
+    def mean(key: str) -> float:
+        return round(sum(float(entry.get(key) or 0) for entry in agents) / n, 3)
+
+    def rate(key: str, value: str) -> float:
+        return round(sum(1 for entry in agents if entry.get(key) == value) / n, 3)
+
+    return {
+        "n": n,
+        "mean_searches": mean("searches"),
+        "mean_decisions": mean("steps"),
+        "mean_calls": mean("llm_calls"),
+        "step_limit_rate": rate("stop_reason", "step_limit"),
+        "invalid_json_rate": rate("stop_reason", "invalid_json"),
+        "below_threshold_rate": rate("reason", "below_min_top_score"),
+    }
 
 
 def print_summary(label: str, summary: dict[str, Any]) -> None:
@@ -354,6 +445,17 @@ def print_summary(label: str, summary: dict[str, Any]) -> None:
     print(f"{'correctness':22} {show(summary['correctness'])}")
     print(f"{'p50 latency (ms)':22} {show(summary['p50_latency_ms'], 0)}")
 
+    loop = agent_stats(label)
+    if loop:
+        print()
+        print("loop")
+        print(f"{'mean searches':22} {loop['mean_searches']:.2f}")
+        print(f"{'mean decisions':22} {loop['mean_decisions']:.2f}")
+        print(f"{'mean model calls':22} {loop['mean_calls']:.2f}")
+        print(f"{'hit step limit':22} {loop['step_limit_rate'] * 100:.1f}%")
+        print(f"{'invalid JSON':22} {loop['invalid_json_rate'] * 100:.1f}%")
+        print(f"{'below MIN_TOP_SCORE':22} {loop['below_threshold_rate'] * 100:.1f}%")
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the gold set over the corpus")
@@ -364,6 +466,9 @@ def main() -> None:
     parser.add_argument("--resume", action="store_true", help="skip finished ids")
     parser.add_argument("--model", default=None, help="override LLM_MODEL")
     parser.add_argument("--k", type=int, default=None, help="override TOP_K")
+    parser.add_argument("--agent", action="store_true", help="use the agent loop")
+    parser.add_argument("--max-steps", type=int, default=None)
+    parser.add_argument("--thinking", choices=("off", "prompted"), default=None)
     args = parser.parse_args()
 
     if args.check_gold:

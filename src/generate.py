@@ -61,13 +61,19 @@ def is_refusal(text: str) -> bool:
     return REFUSAL_RE.search(text) is not None
 
 
-def answer_question(
+def answer_from_hits(
     question: str,
-    k: int | None = None,
+    hits: list[Hit],
+    *,
     model: str | None = None,
 ) -> Answer:
+    """Generate an answer from a hit list someone else chose.
+
+    The single-shot path passes one search result; the agent passes everything
+    it accumulated. Keeping this separate is what lets Phase 6 compare the two
+    modes on the same prompt.
+    """
     started = time.perf_counter()
-    hits = search(question, k=k)
 
     if not hits:
         elapsed = int((time.perf_counter() - started) * 1000)
@@ -86,3 +92,11 @@ def answer_question(
         tokens_in=result["tokens_in"],
         tokens_out=result["tokens_out"],
     )
+
+
+def answer_question(
+    question: str,
+    k: int | None = None,
+    model: str | None = None,
+) -> Answer:
+    return answer_from_hits(question, search(question, k=k), model=model)

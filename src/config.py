@@ -19,6 +19,7 @@ class Settings:
         self.embed_dim: int = int(os.getenv("EMBED_DIM", "384"))
 
         self.thinking: str = os.getenv("THINKING", "off").lower()
+        self.max_steps: int = int(os.getenv("MAX_STEPS", "3"))
         self.num_ctx: int = int(os.getenv("NUM_CTX", "4096"))
 
         self.top_k: int = int(os.getenv("TOP_K", "4"))
