@@ -75,3 +75,44 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
             statistics.median(row["latency_ms"] for row in rows) if rows else None
         ),
     }
+
+def threshold_curve(
+    rows: list[dict[str, Any]], thresholds: list[float]
+) -> list[dict[str, Any]]:
+    """Gate-only refusal trade-off, computed from stored top scores.
+
+    Assumes the answer step is skipped when top_score < t, which is exactly what
+    the agent's gate does. For a single-pass row the same arithmetic is a
+    counterfactual: the model may also refuse on its own.
+    """
+    answerable = [row for row in rows if row["answerable"]]
+    unanswerable = [row for row in rows if not row["answerable"]]
+
+    def score(row: dict[str, Any]) -> float:
+        value = row.get("top_score")
+        return 0.0 if value is None else float(value)
+
+    curve: list[dict[str, Any]] = []
+    for threshold in thresholds:
+        false_refusal = (
+            sum(1 for row in answerable if score(row) < threshold) / len(answerable)
+            if answerable
+            else None
+        )
+        caught = (
+            sum(1 for row in unanswerable if score(row) < threshold) / len(unanswerable)
+            if unanswerable
+            else None
+        )
+        curve.append(
+            {
+                "threshold": threshold,
+                "false_refusal_rate": (
+                    round(false_refusal, 4) if false_refusal is not None else None
+                ),
+                "gate_refusal_recall": (
+                    round(caught, 4) if caught is not None else None
+                ),
+            }
+        )
+    return curve

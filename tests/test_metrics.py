@@ -1,6 +1,6 @@
 import pytest
 
-from src.metrics import is_hit, matches, mean, reciprocal_rank, summarize
+from src.metrics import is_hit, matches, mean, reciprocal_rank, summarize, threshold_curve
 from src.retrieve import Hit
 
 
@@ -95,3 +95,31 @@ def test_summarize_empty():
 
 def test_mean_skips_none():
     assert mean([1.0, None, 0.0]) == 0.5
+
+
+def threshold_rows():
+    return [
+        {"answerable": True, "top_score": 0.80},
+        {"answerable": True, "top_score": 0.40},
+        {"answerable": False, "top_score": 0.30},
+        {"answerable": False, "top_score": 0.60},
+    ]
+
+
+def test_threshold_curve_trades_false_refusals_for_recall():
+    curve = threshold_curve(threshold_rows(), [0.2, 0.5, 0.7])
+    by_threshold = {row["threshold"]: row for row in curve}
+
+    assert by_threshold[0.2]["false_refusal_rate"] == 0.0
+    assert by_threshold[0.2]["gate_refusal_recall"] == 0.0
+    assert by_threshold[0.5]["false_refusal_rate"] == 0.5
+    assert by_threshold[0.5]["gate_refusal_recall"] == 0.5
+    assert by_threshold[0.7]["false_refusal_rate"] == 1.0
+
+
+def test_threshold_curve_handles_missing_scores_and_empty_slices():
+    rows = [{"answerable": True, "top_score": None}]
+    curve = threshold_curve(rows, [0.35])
+
+    assert curve[0]["false_refusal_rate"] == 1.0
+    assert curve[0]["gate_refusal_recall"] is None

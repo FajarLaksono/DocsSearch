@@ -12,3 +12,4 @@ data/*
 !data/.gitkeep
 docs/
 MyNotes.txt
+reports/

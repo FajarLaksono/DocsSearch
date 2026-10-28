@@ -64,3 +64,9 @@ agent:         ## run the agent loop (Q=..., ARGS=--thinking prompted)
 
 explain:       ## explain an answer (Q=..., or ARGS=--run 12)
 	docker compose run --rm app python -m src.explain "$(Q)" $(ARGS)
+
+sweep:         ## run the experiment matrix (ARGS=--only k --dry-run)
+	docker compose run --rm app python -m src.sweep $(ARGS)
+
+report:        ## write reports/results.md from eval_results
+	docker compose run --rm app python -m src.report $(ARGS)
