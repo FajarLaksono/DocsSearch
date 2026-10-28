@@ -61,3 +61,6 @@ eval:          ## run the gold set (ARGS=--limit 5 --no-judge)
 
 agent:         ## run the agent loop (Q=..., ARGS=--thinking prompted)
 	docker compose run --rm app python -m src.agent "$(Q)" $(ARGS)
+
+explain:       ## explain an answer (Q=..., or ARGS=--run 12)
+	docker compose run --rm app python -m src.explain "$(Q)" $(ARGS)

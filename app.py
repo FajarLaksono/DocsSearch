@@ -15,7 +15,7 @@ from typing import Any
 
 import streamlit as st
 
-from src import llm, trace, agent
+from src import llm, trace, agent, explain, evaluate, judge
 from src.config import settings
 from src.generate import Answer, answer_question
 
@@ -277,8 +277,12 @@ st.markdown(render_answer(answer.text, len(answer.hits)), unsafe_allow_html=True
 if run and run.get("llm_model") != model:
     st.caption(f"This run was produced by `{run['llm_model']}`, not `{model}`.")
 
-sources_tab, trace_tab, confidence_tab, raw_tab = st.tabs(
-    ["Sources", "Trace", "Confidence", "Raw"]
+# sources_tab, trace_tab, explain_tab, confidence_tab, evaluation_tab, raw_tab = st.tabs(
+#     ["Sources", "Trace", "Explain", "Confidence", "Evaluation", "Raw"]
+# )
+
+sources_tab, trace_tab, explain_tab, confidence_tab, raw_tab = st.tabs(
+    ["Sources", "Trace", "Explain", "Confidence", "Raw"]
 )
 
 with sources_tab:
@@ -354,8 +358,277 @@ with confidence_tab:
     st.divider()
     st.json(jsonable(metrics))
 
+
 with raw_tab:
     if run:
         st.json(jsonable(run))
     else:
         st.info("This answer was not stored.")
+
+with explain_tab:
+    st.caption(
+        "Highlighting is lexical and free. The two counterfactuals call the model "
+        "and are never run on page load."
+    )
+
+    rows = explain.highlight(answer.text, answer.hits)
+    matched = sum(1 for row in rows if row["matches"])
+
+    if not answer.hits:
+        st.warning("No sources were retrieved; there is nothing to attribute.")
+    else:
+        st.markdown(
+            f"**Sentence coverage** — {matched} of {len(rows)} answer sentences "
+            "share content words with a source."
+        )
+        st.dataframe(
+            [
+                {
+                    "answer sentence": row["sentence"][:90],
+                    "source": (
+                        f"[{row['matches'][0]['rank']}] "
+                        f"{row['matches'][0]['document']}"
+                        if row["matches"]
+                        else "—"
+                    ),
+                    "overlap": (
+                        row["matches"][0]["score"] if row["matches"] else 0.0
+                    ),
+                }
+                for row in rows
+            ],
+            hide_index=True,
+            use_container_width=True,
+        )
+
+        by_rank = {
+            rank: explain.marked_sentences(rows, rank)
+            for rank in range(1, len(answer.hits) + 1)
+        }
+        st.markdown("**Marked sources** — the sentences behind each citation.")
+        for rank, hit in enumerate(answer.hits, start=1):
+            if not by_rank[rank]:
+                continue
+            with st.expander(
+                f"[{rank}] {hit.score:.3f}  {hit.document} · chunk {hit.chunk_index}",
+                expanded=(rank == 1),
+            ):
+                st.markdown(
+                    explain.highlight_html(hit.content, by_rank[rank]),
+                    unsafe_allow_html=True,
+                )
+        if not any(by_rank.values()):
+            st.info("No answer sentence shares content words with a source. That is a citation to distrust.")
+
+    st.divider()
+    st.markdown("**Leave-one-out** — remove one chunk, re-answer, compare.")
+    loo_key = f"loo_{(run or {}).get('id', answer.question)}"
+    if st.button(
+        f"Run leave-one-out ({len(answer.hits)} model calls)",
+        key="loo_button",
+        disabled=len(answer.hits) < 2,
+    ):
+        with st.spinner("Re-answering with each chunk removed…"):
+            st.session_state[loo_key] = explain.leave_one_out(
+                answer.question, answer, answer.hits
+            )
+
+    influences = st.session_state.get(loo_key)
+    if influences:
+        st.dataframe(
+            [
+                {
+                    "removed": f"[{row.removed_rank}]",
+                    "chunk_id": row.chunk_id,
+                    "document": row.document,
+                    "score": row.score,
+                    "kept": row.kept,
+                    "verdict": "influential" if row.changed else "dispensable",
+                    "citations": ",".join(f"[{c}]" for c in row.citations) or "none",
+                }
+                for row in influences
+            ],
+            hide_index=True,
+            use_container_width=True,
+        )
+        worst = min(influences, key=lambda row: row.kept)
+        st.caption(
+            f"Most influential: chunk {worst.chunk_id} (kept {worst.kept:.3f}). "
+            "Low `kept` means the answer depended on it."
+        )
+        with st.expander("Read the counterfactual answers"):
+            for row in influences:
+                st.markdown(f"**Without [{row.removed_rank}]** — kept {row.kept:.3f}")
+                st.write(row.answer)
+
+    st.divider()
+    st.markdown("**Without RAG** — the same question, no corpus.")
+    plain_key = f"plain_{(run or {}).get('id', answer.question)}"
+    if st.button("Answer without RAG (1 model call)", key="plain_button"):
+        with st.spinner("Asking the model with no sources…"):
+            st.session_state[plain_key] = explain.without_rag(
+                answer.question, model=model
+            )
+
+    plain = st.session_state.get(plain_key)
+    if plain:
+        left, right = st.columns(2)
+        with left:
+            st.markdown("**With retrieval**")
+            st.write(answer.text)
+            st.caption(f"{answer.latency_ms} ms · cites {answer.citations or 'nothing'}")
+        with right:
+            st.markdown("**Without retrieval**")
+            st.write(plain["text"])
+            st.caption(f"{plain['latency_ms']} ms · cites nothing")
+        st.caption(
+            "The no-RAG answer is not stored: it is an exhibit, not a product answer."
+        )
+
+
+# with evaluation_tab:
+#     with st.expander("Evaluate current answer (ad-hoc)"):
+#             st.caption("Saves a row to eval_results for this run. Uses gold-like fields if provided.")
+#             with st.form("ad_hoc_eval"):
+#                 label = st.text_input("Eval label", value=f"ui-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
+#                 expected_doc = st.text_input("Expected document (e.g. sample/rag-basics.md)", value="")
+#                 expected_phrase = st.text_input("Expected phrase (optional)", value="")
+#                 gold_answer = st.text_area("Gold answer (optional, helps the judge)", value="")
+#                 use_j = st.checkbox("Use LLM judge", value=True)
+#                 submitted_eval = st.form_submit_button("Save evaluation")
+    
+#             if submitted_eval and answer is not None:
+#                 if not run or "id" not in run:
+#                     st.warning("This answer isn't saved to runs yet. Ask the question first so it has a run_id.")
+#                     st.stop()
+    
+#                 item = {
+#                     "id": f"ui-{run['id']}",
+#                     "question": answer.question,
+#                     "answerable": bool(expected_doc.strip()),
+#                     "expected_document": expected_doc.strip() or None,
+#                     "expected_phrase": expected_phrase.strip() or None,
+#                     "gold_answer": gold_answer.strip() or None,
+#                 }
+    
+#                 answerable = bool(item["answerable"])
+#                 hit = None
+#                 rr = None
+#                 if answerable and item["expected_document"]:
+#                     hit = evaluate.metrics.is_hit(answer.hits, item["expected_document"], item["expected_phrase"]) if False else __import__("src.metrics", fromlist=[""]).is_hit(answer.hits, item["expected_document"], item["expected_phrase"])
+#                     rr = __import__("src.metrics", fromlist=[""]).reciprocal_rank(answer.hits, item["expected_document"], item["expected_phrase"])
+    
+#                 verdict = judge.JudgeResult(faithfulness=None, correct=None)
+#                 if use_j:
+#                     if not answerable and answer.refused:
+#                         verdict = judge.JudgeResult(faithfulness=None, correct=None)
+#                     else:
+#                         verdict = judge.judge_answer(
+#                             item["question"],
+#                             answer.text,
+#                             judge.format_context(answer.hits),
+#                             gold_answer=item.get("gold_answer"),
+#                         )
+    
+#                 try:
+#                     evaluate.save_row(
+#                         label=label.strip() or f"ui-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
+#                         item=item,
+#                         answer=answer,
+#                         run_id=run["id"],
+#                         hit=hit,
+#                         reciprocal_rank=rr,
+#                         verdict=verdict,
+#                         model=run.get("llm_model") or model,
+#                         k=top_k,
+#                         use_judge=use_j,
+#                         use_agent=use_agent,
+#                         agent_metrics=metrics if use_agent else None,
+#                     )
+#                     st.success(f"Saved to eval_results under label '{label}'")
+#                 except Exception as exc:
+#                     st.error(f"Failed to save evaluation: {exc}")
+
+#     st.caption("Results from `eval_results`. Run evaluations via `python -m src.evaluate --label <name>`.")
+#     try:
+#         labels = evaluate.labels()
+#     except Exception as exc:
+#         st.error(f"Cannot load evaluation labels: {exc}")
+#         labels = []
+
+#     if not labels:
+#         st.info("No evaluation runs found yet. Run `python -m src.evaluate --label baseline` first.")
+#     else:
+#         label_map = {}
+#         for row in labels:
+#             last = row.get("last_run")
+#             last_str = last.strftime("%Y-%m-%d %H:%M") if last else "unknown"
+#             label_map[row["label"]] = f"{row['label']} · {row['n']} q · {last_str}"
+
+#         chosen = st.selectbox("Eval label", list(label_map.keys()), format_func=label_map.get)
+#         if not chosen:
+#             st.stop()
+
+#         try:
+#             summary = evaluate.summarize_label(chosen)
+#         except Exception as exc:
+#             st.error(f"Failed to summarize {chosen}: {exc}")
+#             st.stop()
+
+#         st.subheader("Summary")
+#         c1, c2, c3, c4 = st.columns(4)
+#         c1.metric("N", summary.get("n"))
+#         c1.caption(f"{summary.get('n_answerable')} answerable / {summary.get('n', 0) - summary.get('n_answerable', 0)} unanswerable")
+#         c2.metric("Hit@k", f"{summary['hit_at_k']:.3f}" if summary.get("hit_at_k") is not None else "n/a")
+#         c3.metric("MRR", f"{summary['mrr']:.3f}" if summary.get("mrr") is not None else "n/a")
+#         c4.metric("Faithfulness", f"{summary['faithfulness']:.3f}" if summary.get("faithfulness") is not None else "n/a")
+
+#         c5, c6, c7, c8 = st.columns(4)
+#         c5.metric("Correctness", f"{summary['correctness']:.3f}" if summary.get("correctness") is not None else "n/a")
+#         c6.metric("Refusal recall", f"{summary['refusal_recall']:.3f}" if summary.get("refusal_recall") is not None else "n/a")
+#         c7.metric("False refusal rate", f"{summary['false_refusal_rate']:.3f}" if summary.get("false_refusal_rate") is not None else "n/a")
+#         c8.metric("p50 latency (ms)", f"{summary['p50_latency_ms']:.0f}" if summary.get("p50_latency_ms") is not None else "n/a")
+
+#         astats = evaluate.agent_stats(chosen)
+#         if astats:
+#             st.divider()
+#             st.subheader("Agent loop stats")
+#             a1, a2, a3, a4 = st.columns(4)
+#             a1.metric("Mean searches", f"{astats.get('mean_searches', 0):.2f}")
+#             a2.metric("Mean decisions", f"{astats.get('mean_decisions', 0):.2f}")
+#             a3.metric("Mean model calls", f"{astats.get('mean_calls', 0):.2f}")
+#             a4.metric("Hit step limit", f"{astats.get('step_limit_rate', 0) * 100:.1f}%")
+#             a5, a6, a7, a8 = st.columns(4)
+#             a5.metric("Invalid JSON", f"{astats.get('invalid_json_rate', 0) * 100:.1f}%")
+#             a6.metric("Below MIN_TOP_SCORE", f"{astats.get('below_threshold_rate', 0) * 100:.1f}%")
+
+#         st.divider()
+#         st.subheader("Per-question results")
+#         try:
+#             rows = evaluate.load_results(chosen)
+#         except Exception as exc:
+#             st.error(f"Failed to load results for {chosen}: {exc}")
+#             rows = []
+
+#         if rows:
+#             table = []
+#             for r in rows:
+#                 details = r.get("details") or {}
+#                 table.append(
+#                     {
+#                         "question_id": r["question_id"],
+#                         "answerable": details.get("answerable"),
+#                         "hit": r["hit"],
+#                         "mrr": r["mrr"],
+#                         "faithfulness": r["faithfulness"],
+#                         "correct": r["correct"],
+#                         "refused": r["refused"],
+#                         "latency_ms": r["latency_ms"],
+#                     }
+#                 )
+#             st.dataframe(table, hide_index=True, use_container_width=True)
+
+#             with st.expander("Full details (JSON)"):
+#                 st.json(jsonable(rows))
+#         else:
+#             st.caption("No rows for this label.")
