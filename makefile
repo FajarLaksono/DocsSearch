@@ -5,8 +5,11 @@ EMBED_MODEL ?= all-minilm
 
 .PHONY: up down logs psql smoke ingest reingest retrieve ask trace eval agent test models pull-models reset-db clean shell
 
-up:            ## start Postgres and the app (build if needed)
+build:            ## start Postgres and the app with build (build if needed)
 	docker compose up -d --build
+
+up:            ## start Postgres and the app (build if needed)
+	docker compose up -d
 
 down:          ## stop everything; data is kept
 	docker compose down
